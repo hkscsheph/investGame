@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Serverless Invest Game (Visualized)</title>
+    <title>投資模擬大師 (Visualized)</title>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
     
@@ -106,10 +106,7 @@
       const SUPABASE_KEY =
         'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InBiamdreGZpZWZ0Zm5qZHh3ZGl1Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjQyNTkxNDUsImV4cCI6MjA3OTgzNTE0NX0.YdHCt0Xd0XCL2sCYfd_-4jJolaQKgLKEACK_bohMx3o';
 
-      // FIX 2: We name our client 'sb' instead of 'supabase' to avoid conflict with the library name
     const { createClient } = supabase;
-
-      // FIX 2: We name our client 'sb' instead of 'supabase' to avoid conflict with the library name
     const sb = createClient(SUPABASE_URL, SUPABASE_KEY);
 
     // --- 2. STATE ---
@@ -158,6 +155,12 @@
         await fetchPlayers();
 
 
+
+        // Setup Realtime Subscriptions (Using 'sb')
+        
+        // Setup Realtime Subscriptions (Using 'sb')
+        
+
         // Setup Realtime Subscriptions (Using 'sb')
         
         // Setup Realtime Subscriptions (Using 'sb')
@@ -188,33 +191,25 @@
     }
 
     async function fetchPlayers() {
-        // 1. Get latest list
         const { data } = await sb.from('players').select('*').order('balance', { ascending: false });
         players = data.filter(p => !p.is_gm); 
         
-        // 2. GM View: Update List & Chart
         if (myRole === 'gm') {
             renderGMPlayerList();
             renderGMChart();
-        } 
-        // 3. Player View: Check if I still exist
-        else {
+        } else {
             const me = players.find(p => p.id === myId);
-            
-            // LOGIC CHANGE: If 'me' is undefined, it means the GM reset the game and deleted me.
+            // Detect if player was deleted (Reset)
             if (!me) {
-                // Clear local storage and show login screen
                 localStorage.removeItem('my_invest_id');
                 document.getElementById('playerUI').classList.add('hidden');
                 document.getElementById('loginScreen').classList.remove('hidden');
-                document.getElementById('playerNameInput').value = ''; 
-                return; // Stop running
+                document.getElementById('playerNameInput').value = '';
+                return;
             }
 
-            // Normal update if I still exist
             document.getElementById('pBalance').innerText = Math.floor(me.balance).toLocaleString();
             renderPlayerChart(me);
-            
             if (me.submitted) {
                 document.getElementById('allocationControls').classList.add('hidden');
                 document.getElementById('waitingMessage').classList.remove('hidden');
@@ -223,7 +218,8 @@
                 document.getElementById('waitingMessage').classList.add('hidden');
             }
         }
-    }   
+    }
+
     // --- 5. RENDER UI ---
     function updateUI() {
         if(!gameState) return;
@@ -322,24 +318,17 @@
     async function submitAllocation() {
         const sliders = document.querySelectorAll('.asset-slider');
         let updates = [];
-        
         sliders.forEach(s => {
             updates.push({
                 player_id: myId,
                 asset_id: s.dataset.id,
-                percent: parseInt(s.value || 0) // Ensure no nulls
+                percent: parseInt(s.value)
             });
         });
-
-        // 1. Send data
-        const { error: allocError } = await sb.from('allocations').upsert(updates);
-        if (allocError) return alert("Error sending allocation: " + allocError.message);
-
-        // 2. Mark as submitted
-        const { error: playerError } = await sb.from('players').update({ submitted: true }).eq('id', myId);
-        if (playerError) return alert("Error updating status: " + playerError.message);
+        await sb.from('allocations').upsert(updates);
+        await sb.from('players').update({ submitted: true }).eq('id', myId);
     }
-    
+
     // --- 7. GM LOGIC ---
     async function addAsset() {
         const name = document.getElementById('newAssetName').value;
@@ -356,26 +345,13 @@
     async function processRound() {
         const inputs = document.querySelectorAll('.gm-rate-input');
         let rates = {};
-        
-        // Loop through inputs and safeguard against empty values
         inputs.forEach(i => {
             let val = parseFloat(i.value);
-            if (isNaN(val)) val = 0; // Default to 0 if empty
+            if(isNaN(val)) val = 0;
             rates[i.dataset.id] = val;
         });
-
-        console.log("Sending Rates:", rates); // Debugging log
-
-        // Call the database function
         const { error } = await sb.rpc('process_round', { rates_json: rates });
-        
-        if(error) {
-            console.error(error);
-            alert('Error processing round: ' + error.message);
-        } else {
-            // Optional: Alert success or just let the UI update handle it
-            console.log("Round processed successfully");
-        }
+        if(error) alert('Error: ' + error.message);
     }
 
     async function resetGame() {
@@ -398,9 +374,7 @@
         });
     }
 
-    // --- 8. VISUALIZATION ENGINE (The Fix) ---
-    
-    // Calculates intermediate curve points between rounds
+    // --- 8. VISUALIZATION ENGINE (Interpolation) ---
     function generateCompoundData(history, freq) {
         let dataPoints = [];
         let labels = [];
@@ -411,30 +385,27 @@
         dataPoints.push(history[0]);
         labels.push('Start');
 
-        // Iterate through each round transition
+        // Iterate through rounds
         for (let i = 0; i < history.length - 1; i++) {
             let startVal = parseFloat(history[i]);
             let endVal = parseFloat(history[i+1]);
 
-            // Calculate per-step multiplier
-            // If Freq is 1, steps=1. If Freq is 12, steps=12.
-            // Ratio = End / Start
-            let ratio = endVal / (startVal === 0 ? 1 : startVal);
-            
-            // Handle negative or zero logic gracefully
-            if (startVal <= 0 || endVal <= 0) {
-                 // Linear interpolation fallback for edge cases
+            // Determine Ratio (End/Start)
+            // Use fallback if start <= 0 to prevent NaN
+            if (startVal <= 0) {
+                 // Linear interpolation fallback
                  let stepSize = (endVal - startVal) / freq;
                  for (let j = 1; j <= freq; j++) {
                     dataPoints.push(startVal + (stepSize * j));
                     labels.push(j === parseInt(freq) ? `R${i+1}` : '');
                  }
             } else {
+                 // Geometric (Compound) interpolation
+                 let ratio = endVal / startVal;
                  let stepMultiplier = Math.pow(ratio, 1 / freq);
                  for (let j = 1; j <= freq; j++) {
                     let val = startVal * Math.pow(stepMultiplier, j);
                     dataPoints.push(val);
-                    // Only label the integer rounds
                     labels.push(j === parseInt(freq) ? `R${i+1}` : '');
                  }
             }
@@ -446,15 +417,15 @@
         responsive: true, 
         maintainAspectRatio: false, 
         elements: { 
-            line: { tension: 0.4 },
-            point: { radius: 0, hitRadius: 10 } // Hide intermediate dots, keep clickable
-        } 
+            line: { tension: 0.4 }, // Smooth curve
+            point: { hitRadius: 10 }
+        },
+        interaction: { mode: 'index', intersect: false }
     };
 
     function renderPlayerChart(me) {
         if(pChart) pChart.destroy();
         
-        // Use the new Interpolation Function
         const { data, labels } = generateCompoundData(me.history, gameState.compounding_freq);
 
         pChart = new Chart(document.getElementById('playerChart'), {
@@ -466,7 +437,7 @@
                     data: data, 
                     borderColor: '#3498db', 
                     fill: true,
-                    // Show dot only on rounds
+                    // Hide intermediate dots
                     pointRadius: (ctx) => ctx.dataIndex % gameState.compounding_freq === 0 ? 3 : 0
                 }] 
             },
@@ -478,12 +449,10 @@
         if(gmChart) gmChart.destroy();
         if(players.length === 0) return;
         
-        // Calculate the longest history to generate base labels
         const maxHistoryPlayer = players.reduce((prev, current) => (prev.history.length > current.history.length) ? prev : current);
         const { labels } = generateCompoundData(maxHistoryPlayer.history, gameState.compounding_freq);
         
         const colors = ['#e74c3c', '#3498db', '#9b59b6', '#2ecc71', '#f1c40f'];
-        
         const datasets = players.map((p, i) => {
             const curve = generateCompoundData(p.history, gameState.compounding_freq);
             return {
